@@ -1,0 +1,13 @@
+# Keep the build context small: the image build compiles from source inside the
+# builder stage and needs none of this.
+.git
+.github
+**/build/
+.gradle/
+docs/
+load/
+scripts/
+*.md
+.idea/
+.vscode/
+**/.DS_Store
