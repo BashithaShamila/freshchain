@@ -1,0 +1,40 @@
+spring:
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        # Surfaces a lock wait that has gone wrong as a fast failure rather than
+        # a hung test.
+        jakarta.persistence.lock.timeout: 10000
+  datasource:
+    hikari:
+      # The concurrency test fires 50 threads at once and each holds a
+      # connection while it waits on the row lock.
+      maximum-pool-size: 60
+      connection-timeout: 30000
+  flyway:
+    enabled: true
+  ai:
+    model:
+      chat: none
+      embedding: none
+
+freshchain:
+  security:
+    enabled: false
+  outbox:
+    poll-interval-ms: 300
+  reservation:
+    ttl: PT15M
+    sweep-interval-ms: 500
+  substitution:
+    enabled: true
+
+logging:
+  level:
+    com.freshchain: INFO
+    org.testcontainers: WARN
+    org.apache.kafka: ERROR
+    com.zaxxer.hikari: WARN
