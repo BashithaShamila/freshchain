@@ -1,0 +1,31 @@
+spring:
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        # Surfaces a lock wait that has gone wrong as a fast failure rather than
+        # a hung test.
+        jakarta.persistence.lock.timeout: 10000
+  datasource:
+    hikari:
+      maximum-pool-size: 20
+      connection-timeout: 30000
+  flyway:
+    enabled: true
+freshchain:
+  security:
+    enabled: false
+  outbox:
+    poll-interval-ms: 300
+  inventory:
+    # Nothing to call in tests, and the preview is explicitly allowed to fail.
+    preview-enabled: false
+
+logging:
+  level:
+    com.freshchain: INFO
+    org.testcontainers: WARN
+    org.apache.kafka: ERROR
+    com.zaxxer.hikari: WARN
