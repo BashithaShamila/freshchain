@@ -1,0 +1,107 @@
+spring:
+  application:
+    name: fulfillment-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/freshchain_fulfillment}
+    username: ${SPRING_DATASOURCE_USERNAME:freshchain}
+    password: ${SPRING_DATASOURCE_PASSWORD:freshchain}
+    hikari:
+      maximum-pool-size: 20
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: fulfillment-service
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+      concurrency: 3
+      # Consumers observe, so a listener continues the trace carried on the record.
+      observation-enabled: true
+    template:
+      # The producer deliberately does NOT observe. Its automatic instrumentation
+      # would inject a traceparent for whatever span is active at send time — and
+      # for the outbox publisher that is a scheduled poller tick, not the request
+      # that caused the event. OutboxPublisher sets the header itself from the
+      # traceparent captured when the row was written, which is the trace anyone
+      # debugging actually wants to follow.
+      observation-enabled: false
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # The issuer is the token endpoint URL. It is validated as a claim
+          # on every token; the signing keys come from jwk-set-uri below.
+          issuer-uri: ${FRESHCHAIN_ISSUER_URI:https://api.asgardeo.io/t/CHANGE_ME/oauth2/token}
+          # Reject a validly-signed token that was minted for a different
+          # application in the same organisation.
+          audiences: ${FRESHCHAIN_OAUTH_AUDIENCE:}
+          # Set explicitly, and not because of any address split — Asgardeo has
+          # one public URL for everyone. Discovery from the issuer is resolved
+          # eagerly at start-up, which would make every service fail to boot
+          # whenever the identity provider is briefly unreachable. Naming the
+          # JWKS URL defers the fetch to the first token instead.
+          jwk-set-uri: ${FRESHCHAIN_JWKS_URI:https://api.asgardeo.io/t/CHANGE_ME/oauth2/jwks}
+
+server:
+  port: ${SERVER_PORT:8083}
+  shutdown: graceful
+
+freshchain:
+  outbox:
+    poll-interval-ms: 500
+    batch-size: 100
+    # Published rows are kept this long as a debugging record, then deleted so
+    # the table cannot grow without bound. Unpublished rows are never pruned.
+    retention: P3D
+    prune-interval-ms: 3600000
+  security:
+    enabled: ${FRESHCHAIN_SECURITY_ENABLED:true}
+    # Asgardeo emits application roles under `roles` and group membership under
+    # `groups`; which one carries your model depends on how the app is set up,
+    # so both are read. Run ./scripts/asgardeo-check.sh to see what your tenant
+    # actually sends.
+    role-claims: ${FRESHCHAIN_ROLE_CLAIMS:roles,groups}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: fulfillment-service
+  tracing:
+    sampling:
+      probability: 1.0
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  pattern:
+    level: "%5p [${spring.application.name:},%X{traceId:-},%X{spanId:-},order=%X{orderId:-}]"
+  level:
+    com.freshchain: INFO
+
