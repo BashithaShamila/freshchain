@@ -1,0 +1,84 @@
+spring:
+  application:
+    name: gateway
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # The issuer is the token endpoint URL. It is validated as a claim
+          # on every token; the signing keys come from jwk-set-uri below.
+          issuer-uri: ${FRESHCHAIN_ISSUER_URI:https://api.asgardeo.io/t/CHANGE_ME/oauth2/token}
+          # Reject a validly-signed token that was minted for a different
+          # application in the same organisation.
+          audiences: ${FRESHCHAIN_OAUTH_AUDIENCE:}
+          # Set explicitly, and not because of any address split — Asgardeo has
+          # one public URL for everyone. Discovery from the issuer is resolved
+          # eagerly at start-up, which would make every service fail to boot
+          # whenever the identity provider is briefly unreachable. Naming the
+          # JWKS URL defers the fetch to the first token instead.
+          jwk-set-uri: ${FRESHCHAIN_JWKS_URI:https://api.asgardeo.io/t/CHANGE_ME/oauth2/jwks}
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+freshchain:
+  cors:
+    # Only needed when the frontend runs on its own dev server; in the container
+    # nginx proxies /api so requests are same-origin.
+    allowed-origins: ${FRESHCHAIN_CORS_ORIGINS:http://localhost:5173,http://localhost:3001}
+  security:
+    # Asgardeo emits application roles under `roles` and group membership under
+    # `groups`; which one carries your model depends on how the app is set up,
+    # so both are read. Run ./scripts/asgardeo-check.sh to see what your tenant
+    # actually sends.
+    role-claims: ${FRESHCHAIN_ROLE_CLAIMS:roles,groups}
+  routes:
+    order-service: ${FRESHCHAIN_ORDER_URL:http://localhost:8081}
+    inventory-service: ${FRESHCHAIN_INVENTORY_URL:http://localhost:8082}
+    fulfillment-service: ${FRESHCHAIN_FULFILLMENT_URL:http://localhost:8083}
+  rate-limit:
+    # 20 requests/second sustained, 40 in a burst, per authenticated subject.
+    # Raised via env for load runs, where the point is to measure allocation
+    # rather than to re-prove that the limiter works.
+    replenish-rate: ${FRESHCHAIN_RATE_LIMIT_REPLENISH:20}
+    burst-capacity: ${FRESHCHAIN_RATE_LIMIT_BURST:40}
+    requested-tokens: 1
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics,gateway
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: gateway
+  tracing:
+    sampling:
+      probability: 1.0
+
+logging:
+  pattern:
+    level: "%5p [${spring.application.name:},%X{traceId:-},%X{spanId:-}]"
+  level:
+    com.freshchain: INFO
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+freshchain:
+  routes:
+    order-service: http://order-service:8081
+    inventory-service: http://inventory-service:8082
+    fulfillment-service: http://fulfillment-service:8083
