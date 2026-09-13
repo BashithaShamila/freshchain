@@ -1,0 +1,258 @@
+name: freshchain
+
+x-service-base: &service-base
+  profiles: ["apps"]
+  restart: unless-stopped
+  networks: [freshchain]
+  environment: &service-env
+    SPRING_PROFILES_ACTIVE: docker
+    SPRING_DATASOURCE_USERNAME: freshchain
+    SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-freshchain}
+    # Swagger UI and /v3/api-docs are anonymous by design (directly and via the
+    # gateway's /docs/* routes); switch them off on a public deployment.
+    SPRINGDOC_API_DOCS_ENABLED: ${FRESHCHAIN_API_DOCS_ENABLED:-true}
+    SPRINGDOC_SWAGGER_UI_ENABLED: ${FRESHCHAIN_API_DOCS_ENABLED:-true}
+    SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    SPRING_DATA_REDIS_HOST: redis
+    SPRING_DATA_REDIS_PORT: "6379"
+    # Identity is Asgardeo (SaaS). One public HTTPS address serves both the host
+    # and the containers, so there is no internal/external issuer split to manage.
+    # Values come from .env — see docs/asgardeo-setup.md.
+    FRESHCHAIN_ISSUER_URI: https://api.asgardeo.io/t/${ASGARDEO_ORG:-CHANGE_ME}/oauth2/token
+    FRESHCHAIN_JWKS_URI: https://api.asgardeo.io/t/${ASGARDEO_ORG:-CHANGE_ME}/oauth2/jwks
+    FRESHCHAIN_OAUTH_AUDIENCE: ${ASGARDEO_CLIENT_ID:-},${ASGARDEO_SPA_CLIENT_ID:-}
+    FRESHCHAIN_ROLE_CLAIMS: ${FRESHCHAIN_ROLE_CLAIMS:-roles,groups}
+    # A short DNS cache so a recreated container is found at its new address
+    # rather than the gateway dialling a dead IP until it is restarted.
+    JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -Dsun.net.inetaddr.ttl=5 -Dsun.net.inetaddr.negative.ttl=1"
+
+services:
+  # ---------------------------------------------------------------- infra ---
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: freshchain-postgres
+    environment:
+      POSTGRES_USER: freshchain
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-freshchain}
+      POSTGRES_DB: freshchain
+    # Loopback-only, like every other backing service below: on a shared or
+    # public host nothing but the gateway and the frontend should be reachable
+    # from outside. Reach these over an SSH tunnel when deployed.
+    ports: ["127.0.0.1:${POSTGRES_PORT:-5432}:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./ops/postgres/init-databases.sql:/docker-entrypoint-initdb.d/00-init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freshchain -d freshchain"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [freshchain]
+
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: freshchain-kafka
+    ports: ["127.0.0.1:${KAFKA_PORT:-29092}:29092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:${KAFKA_PORT:-29092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    networks: [freshchain]
+
+  redis:
+    image: redis:7-alpine
+    container_name: freshchain-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [freshchain]
+
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    container_name: freshchain-prometheus
+    ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: [freshchain]
+
+  # Broker-side metrics (topic offsets, and with them DLT depth) that the
+  # services' own Micrometer registries cannot see. Scraped by Prometheus over
+  # the compose network; no host port.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    container_name: freshchain-kafka-exporter
+    restart: unless-stopped
+    command: ["--kafka.server=kafka:9092"]
+    depends_on:
+      kafka: {condition: service_healthy}
+    networks: [freshchain]
+
+  grafana:
+    image: grafana/grafana:13.2.0
+    container_name: freshchain-grafana
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    networks: [freshchain]
+
+  # ------------------------------------------------------------- services ---
+  # Each buildable service also carries an image name, so the same file serves
+  # both workflows: locally `--build` compiles and tags; on a server a plain
+  # `docker compose pull && up -d` fetches images CI already built, and the box
+  # never needs a JDK or a Node toolchain. Point FRESHCHAIN_IMAGE_PREFIX at
+  # your registry namespace (e.g. ghcr.io/<user>/freshchain) and
+  # FRESHCHAIN_IMAGE_TAG at the build you want to run.
+  order-service:
+    <<: *service-base
+    image: ${FRESHCHAIN_IMAGE_PREFIX:-freshchain}/order-service:${FRESHCHAIN_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: ops/Dockerfile
+      args:
+        MODULE: order-service
+    container_name: freshchain-order
+    ports: ["127.0.0.1:${ORDER_PORT:-8081}:8081"]
+    environment:
+      <<: *service-env
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/freshchain_order
+    healthcheck: &spring-health-8081
+      test: ["CMD", "curl", "-sf", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+
+  inventory-service:
+    <<: *service-base
+    image: ${FRESHCHAIN_IMAGE_PREFIX:-freshchain}/inventory-service:${FRESHCHAIN_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: ops/Dockerfile
+      args:
+        MODULE: inventory-service
+    container_name: freshchain-inventory
+    ports: ["127.0.0.1:${INVENTORY_PORT:-8082}:8082"]
+    environment:
+      <<: *service-env
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/freshchain_inventory
+      FRESHCHAIN_SUBSTITUTION_ENABLED: "true"
+    healthcheck:
+      <<: *spring-health-8081
+      test: ["CMD", "curl", "-sf", "http://localhost:8082/actuator/health"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+
+  fulfillment-service:
+    <<: *service-base
+    image: ${FRESHCHAIN_IMAGE_PREFIX:-freshchain}/fulfillment-service:${FRESHCHAIN_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: ops/Dockerfile
+      args:
+        MODULE: fulfillment-service
+    container_name: freshchain-fulfillment
+    ports: ["127.0.0.1:${FULFILLMENT_PORT:-8083}:8083"]
+    environment:
+      <<: *service-env
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/freshchain_fulfillment
+    healthcheck:
+      <<: *spring-health-8081
+      test: ["CMD", "curl", "-sf", "http://localhost:8083/actuator/health"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      kafka: {condition: service_healthy}
+
+  frontend:
+    profiles: ["apps"]
+    image: ${FRESHCHAIN_IMAGE_PREFIX:-freshchain}/frontend:${FRESHCHAIN_IMAGE_TAG:-local}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: freshchain-frontend
+    restart: unless-stopped
+    ports: ["${FRONTEND_PORT:-3001}:8080"]
+    environment:
+      # Read at container start and written into /config.js, so the same image
+      # runs anywhere — nothing about the environment is baked in at build time.
+      ASGARDEO_BASE_URL: https://api.asgardeo.io/t/${ASGARDEO_ORG:-CHANGE_ME}
+      ASGARDEO_SPA_CLIENT_ID: ${ASGARDEO_SPA_CLIENT_ID:-}
+      APP_BASE_URL: ${FRONTEND_URL:-http://localhost:3001}
+      # Empty: nginx proxies /api to the gateway, so calls are same-origin and
+      # the browser never needs CORS or the gateway's address.
+      API_BASE_URL: ""
+    depends_on: [gateway]
+    healthcheck:
+      # 127.0.0.1, not localhost: inside the container localhost resolves to
+      # ::1 first, and nginx is listening on IPv4 only, so the check would fail
+      # against a perfectly healthy server.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [freshchain]
+
+  gateway:
+    <<: *service-base
+    image: ${FRESHCHAIN_IMAGE_PREFIX:-freshchain}/gateway:${FRESHCHAIN_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: ops/Dockerfile
+      args:
+        MODULE: gateway
+    container_name: freshchain-gateway
+    ports: ["${GATEWAY_PORT:-8080}:8080"]
+    environment:
+      <<: *service-env
+      FRESHCHAIN_RATE_LIMIT_REPLENISH: ${FRESHCHAIN_RATE_LIMIT_REPLENISH:-20}
+      FRESHCHAIN_RATE_LIMIT_BURST: ${FRESHCHAIN_RATE_LIMIT_BURST:-40}
+    healthcheck:
+      <<: *spring-health-8081
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/actuator/health"]
+    depends_on:
+      redis: {condition: service_healthy}
+
+volumes:
+  postgres-data:
+  kafka-data:
+  redis-data:
+
+networks:
+  freshchain:
+    name: freshchain
