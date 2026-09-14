@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: freshchain
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["gateway:8080"]
+        labels: {service: gateway}
+      - targets: ["order-service:8081"]
+        labels: {service: order-service}
+      - targets: ["inventory-service:8082"]
+        labels: {service: inventory-service}
+      - targets: ["fulfillment-service:8083"]
+        labels: {service: fulfillment-service}
+
+  # Broker-side view: topic/partition offsets and consumer-group lag from
+  # kafka-exporter. The dashboard's DLT-depth panel reads these — the brokers'
+  # own counters are JMX-only and never reach the services' registries.
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+        labels: {service: kafka}
