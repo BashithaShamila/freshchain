@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Testcontainers pulls these; naming them here keeps CI and local identical.
+  TESTCONTAINERS_REUSE_ENABLE: "false"
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: temurin
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # Testcontainers starts real Postgres and Kafka containers here — not
+      # mocks, not an embedded broker. The GitHub runner has a Docker daemon, so
+      # the same tests that run locally run unchanged in CI.
+      - name: Build and test
+        run: ./gradlew build --no-daemon
+
+      - name: Coverage report
+        if: always()
+        run: ./gradlew jacocoTestReport --no-daemon
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          retention-days: 14
+
+      - name: Publish coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: "**/build/reports/jacoco/"
+          retention-days: 14
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### Test results"
+            echo
+            for module in common-events gateway order-service inventory-service fulfillment-service; do
+              dir="$module/build/test-results/test"
+              [ -d "$dir" ] || continue
+              total=$(grep -ho 'tests="[0-9]*"' "$dir"/*.xml 2>/dev/null | grep -o '[0-9]*' | paste -sd+ - | bc || echo 0)
+              failed=$(grep -ho 'failures="[0-9]*"' "$dir"/*.xml 2>/dev/null | grep -o '[0-9]*' | paste -sd+ - | bc || echo 0)
+              echo "- **$module**: ${total:-0} tests, ${failed:-0} failed"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # `npm run build` runs tsc --noEmit first, so this is the type check and
+      # the production bundle in one step — the same thing the image build does.
+      - run: npm ci --no-audit --no-fund
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  chaos:
+    name: Chaos (broker outage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Deliberately spends time in a broken state, so it runs on main rather than
+    # on every pull request.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "21"
+          distribution: temurin
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew :inventory-service:chaosTest --no-daemon
+
+  images:
+    name: Build container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    if: github.ref == 'refs/heads/main'
+
+    strategy:
+      matrix:
+        include:
+          - {module: gateway,             context: ".",        file: ops/Dockerfile,      build-args: "MODULE=gateway"}
+          - {module: order-service,       context: ".",        file: ops/Dockerfile,      build-args: "MODULE=order-service"}
+          - {module: inventory-service,   context: ".",        file: ops/Dockerfile,      build-args: "MODULE=inventory-service"}
+          - {module: fulfillment-service, context: ".",        file: ops/Dockerfile,      build-args: "MODULE=fulfillment-service"}
+          - {module: frontend,            context: "frontend", file: frontend/Dockerfile, build-args: ""}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.module }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          build-args: ${{ matrix.build-args }}
+          tags: freshchain/${{ matrix.module }}:${{ github.sha }}
+          # Built and cached, not published. Pushing to a registry is part of the
+          # deployment pipeline, which is deliberately not wired up here.
+          push: false
+          load: false
+          cache-from: type=gha,scope=${{ matrix.module }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.module }}
