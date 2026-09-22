@@ -1,0 +1,32 @@
+# Non-secret configuration shared by the services. Fill in the CHANGE_ME
+# Asgardeo values (they are public identifiers, not secrets — the one true
+# secret, the database password, lives in secrets.yaml).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: freshchain-config
+data:
+  # The `docker` profile means "running among containers": it switches the
+  # service-to-service URLs to plain DNS names, which Kubernetes Services
+  # satisfy exactly as the compose network did.
+  SPRING_PROFILES_ACTIVE: docker
+  SPRING_DATASOURCE_USERNAME: freshchain
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  SPRING_DATA_REDIS_HOST: redis
+  SPRING_DATA_REDIS_PORT: "6379"
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -XX:+UseG1GC -Dsun.net.inetaddr.ttl=5 -Dsun.net.inetaddr.negative.ttl=1"
+
+  FRESHCHAIN_ISSUER_URI: https://api.asgardeo.io/t/CHANGE_ME/oauth2/token
+  FRESHCHAIN_JWKS_URI: https://api.asgardeo.io/t/CHANGE_ME/oauth2/jwks
+  FRESHCHAIN_OAUTH_AUDIENCE: "CHANGE_ME_CLI_CLIENT_ID,CHANGE_ME_SPA_CLIENT_ID"
+  FRESHCHAIN_ROLE_CLAIMS: roles,groups
+
+  # Kubernetes is the production posture: anonymous API docs stay off.
+  SPRINGDOC_API_DOCS_ENABLED: "false"
+  SPRINGDOC_SWAGGER_UI_ENABLED: "false"
+
+  # Frontend runtime configuration, written into /config.js at container start.
+  ASGARDEO_BASE_URL: https://api.asgardeo.io/t/CHANGE_ME
+  ASGARDEO_SPA_CLIENT_ID: CHANGE_ME
+  APP_BASE_URL: https://freshchain.example.com
+  API_BASE_URL: ""

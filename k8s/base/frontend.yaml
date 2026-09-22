@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - port: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: freshchain/frontend
+          ports:
+            - containerPort: 8080
+          # The entrypoint writes /config.js from these at container start —
+          # same image everywhere, environment decides the identity provider.
+          env:
+            - name: ASGARDEO_BASE_URL
+              valueFrom:
+                configMapKeyRef: {name: freshchain-config, key: ASGARDEO_BASE_URL}
+            - name: ASGARDEO_SPA_CLIENT_ID
+              valueFrom:
+                configMapKeyRef: {name: freshchain-config, key: ASGARDEO_SPA_CLIENT_ID}
+            - name: APP_BASE_URL
+              valueFrom:
+                configMapKeyRef: {name: freshchain-config, key: APP_BASE_URL}
+            - name: API_BASE_URL
+              valueFrom:
+                configMapKeyRef: {name: freshchain-config, key: API_BASE_URL}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}

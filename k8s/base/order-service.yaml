@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+spec:
+  selector:
+    app: order-service
+  ports:
+    - port: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+spec:
+  # One replica fits the free tier; scaling out is safe by design — the outbox
+  # claims rows with SKIP LOCKED and consumers share a group. Kafka's three
+  # partitions per topic cap useful consumer concurrency at three replicas.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: "8081"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # The image's USER is the name "freshchain"; kubelet can only verify
+        # non-root from a numeric uid, so state the one the Dockerfile creates.
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: order-service
+          image: freshchain/order-service
+          ports:
+            - containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: freshchain-config
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:postgresql://postgres:5432/freshchain_order
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: freshchain-secrets
+                  key: postgres-password
+          # A JVM on a small ARM core can take a while to reach ready; the
+          # startup probe grants that budget so the liveness probe never
+          # kills a service that is merely still booting.
+          startupProbe:
+            httpGet: {path: /actuator/health, port: 8081}
+            periodSeconds: 5
+            failureThreshold: 36
+          readinessProbe:
+            httpGet: {path: /actuator/health/readiness, port: 8081}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /actuator/health/liveness, port: 8081}
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            # Let the endpoint removal propagate before SIGTERM starts the
+            # graceful shutdown, so in-flight requests keep landing somewhere.
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            # Memory limit is what MaxRAMPercentage=70 sizes the heap from.
+            # No CPU limit on purpose: throttling a JVM's startup helps nobody.
+            requests: {cpu: 250m, memory: 768Mi}
+            limits: {memory: 1536Mi}
+      volumes:
+        - name: tmp
+          emptyDir: {}

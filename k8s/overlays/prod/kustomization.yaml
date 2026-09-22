@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+# The base names images generically; this overlay pins where they really live
+# and which build runs. A deploy is one line:
+#
+#   cd k8s/overlays/prod
+#   kustomize edit set image freshchain/gateway=ghcr.io/<user>/freshchain/gateway:sha-abc1234   (once per service)
+#   kubectl apply -k .
+#
+# — which is exactly what the Jenkinsfile's deploy stage automates. Pinning
+# sha-* tags here (not :latest) is what makes rollback a git revert of this
+# file.
+images:
+  - name: freshchain/gateway
+    newName: ghcr.io/CHANGE_ME/freshchain/gateway
+    newTag: latest
+  - name: freshchain/order-service
+    newName: ghcr.io/CHANGE_ME/freshchain/order-service
+    newTag: latest
+  - name: freshchain/inventory-service
+    newName: ghcr.io/CHANGE_ME/freshchain/inventory-service
+    newTag: latest
+  - name: freshchain/fulfillment-service
+    newName: ghcr.io/CHANGE_ME/freshchain/fulfillment-service
+    newTag: latest
+  - name: freshchain/frontend
+    newName: ghcr.io/CHANGE_ME/freshchain/frontend
+    newTag: latest
+
+patches:
+  - target:
+      kind: Ingress
+      name: freshchain
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: freshchain.example.com

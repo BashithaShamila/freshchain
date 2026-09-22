@@ -1,0 +1,29 @@
+# One public entry point. Only the frontend is exposed: its nginx already
+# proxies /api to the gateway inside the cluster, so browser, SPA and API
+# share one origin and CORS never enters the picture — the same shape Caddy
+# gave the compose deployment.
+#
+# On k3s the bundled Traefik picks this up with no ingressClassName. For TLS,
+# install cert-manager, create a ClusterIssuer, then uncomment the annotation
+# and the tls block. The prod overlay patches the real hostname in.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: freshchain
+  # annotations:
+  #   cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  rules:
+    - host: freshchain.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 8080
+  # tls:
+  #   - hosts: [freshchain.example.com]
+  #     secretName: freshchain-tls

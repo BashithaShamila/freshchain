@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Everything lands in one namespace; the service DNS names (postgres, kafka,
+# redis, order-service, ...) then match what the Spring `docker` profile and
+# the frontend's nginx already expect, so no application config changes hands.
+namespace: freshchain
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - postgres.yaml
+  - kafka.yaml
+  - redis.yaml
+  - gateway.yaml
+  - order-service.yaml
+  - inventory-service.yaml
+  - fulfillment-service.yaml
+  - frontend.yaml
+  - ingress.yaml
+  # secrets are deliberately NOT listed: copy secrets.example.yaml to
+  # secrets.yaml (gitignored) and `kubectl apply -f` it once, out of band.
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: freshchain
+
+configMapGenerator:
+  # Local copy of ops/postgres/init-databases.sql — kustomize refuses to read
+  # files outside its own directory. If the original changes, re-copy it.
+  - name: postgres-init
+    files:
+      - postgres-init.sql
